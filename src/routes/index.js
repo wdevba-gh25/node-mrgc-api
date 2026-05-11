@@ -16,6 +16,16 @@ export function createRouter({ scheduleCollapse, cancelCollapse, getServerState 
     });
   });
 
+  router.get('/loadtest/ping', (req, res) => {
+  res.json({
+    status: 'ok',
+    target: 'loadtest-ping',
+    timestamp: new Date().toISOString(),
+    uptimeSec: Math.round(process.uptime()),
+    correlationId: req.context?.correlationId ?? null
+  });
+});
+
   router.post('/simulate/dispatch', asyncHandler(async (req, res) => {
     const { payload, httpCode } = buildDispatchResult({
       ...req.body,
