@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: emergency-surge-backend
+  namespace: aks-mrgnc-surge-prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: emergency-surge-backend
+  template:
+    metadata:
+      labels:
+        app: emergency-surge-backend
+    spec:
+      containers:
+        - name: emergency-surge-backend
+          image: acremergencysurge.azurecr.io/node-mrgc-api-image:prod-v1
+          ports:
+            - containerPort: 4001
+          env:
+            - name: PORT
+              value: "4001"
