@@ -19,6 +19,55 @@ This service was intentionally kept small so the MVP could remain understandable
 
 ---
 
+## Azure Runtime, Load Testing, and Observability Context
+
+This backend is also the runtime target used in the broader Azure delivery evidence package.
+
+The backend was not only used locally. It was later:
+
+- containerized with Docker
+- published to Azure Container Registry
+- deployed to Azure Kubernetes Service
+- exposed through a Dev LoadBalancer endpoint
+- validated through `/health`
+- exercised through `/loadtest/ping`
+- observed through AKS/container logs
+- instrumented with Azure Monitor / Application Insights using OpenTelemetry
+- queried through KQL for request telemetry, P50/P95 duration, and failure count
+
+That Azure layer does not change the original backend design philosophy. The service remains intentionally compact and MVP-focused. The Azure work proves that this compact backend can still participate in a realistic delivery pipeline with runtime validation, observability, and operational evidence.
+
+---
+
+## Why `/loadtest/ping` Was Added
+
+The backend includes a dedicated lightweight endpoint:
+
+```text
+GET /loadtest/ping
+```
+
+This endpoint was added specifically for Azure Load Testing and SRE-style runtime validation.
+
+The main dispatch/simulation flow is useful for the product scenario, but it includes domain behavior that is not ideal for clean latency testing. The load-test endpoint provides a stable backend target that avoids:
+
+- frontend/browser timing noise
+- simulator lifecycle complexity
+- unrelated UI behavior
+- unnecessary dependency on the main product flow
+
+The endpoint returns a tiny deterministic JSON response with:
+
+- status
+- target name
+- timestamp
+- uptime
+- correlation ID
+
+This allowed Azure Load Testing to exercise the deployed Node.js backend directly while AKS logs confirmed that the backend pod processed the traffic.
+
+---
+
 ## Why This Backend Is Intentionally Compact
 
 This backend was not designed as a distributed system.
@@ -197,6 +246,144 @@ The goal of this version is not to claim production-readiness. The goal is to pr
 
 ---
 
+## Azure Monitor / Application Insights Instrumentation
+
+The backend supports optional Azure Monitor / Application Insights telemetry through a separate startup bootstrap file:
+
+```text
+src/instrumentation.js
+```
+
+This instrumentation is intentionally separated from `server.js`.
+
+`server.js` remains focused on:
+
+- Express startup
+- middleware registration
+- route creation
+- request logging
+- not-found handling
+- global error handling
+- graceful shutdown
+- simulated collapse/recovery behavior
+
+The telemetry bootstrap is loaded before the server starts through Node's `--import` option in `package.json`.
+
+### Instrumentation Behavior
+
+The instrumentation checks for:
+
+```text
+APPLICATIONINSIGHTS_CONNECTION_STRING
+```
+
+When the variable exists, the backend initializes Azure Monitor OpenTelemetry export and enables Live Metrics.
+
+When the variable does not exist, the backend still starts normally and logs that Application Insights was not initialized.
+
+This makes the backend safe to run locally without Azure configuration, while still allowing full telemetry when deployed to AKS or another configured environment.
+
+### Instrumentation Pattern
+
+The telemetry bootstrap follows this pattern:
+
+```js
+import { useAzureMonitor } from '@azure/monitor-opentelemetry';
+
+const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING;
+
+if (connectionString) {
+  useAzureMonitor({
+    azureMonitorExporterOptions: {
+      connectionString
+    },
+    enableLiveMetrics: true
+  });
+
+  console.log('Azure Monitor Application Insights initialized');
+} else {
+  console.log('Azure Monitor Application Insights not initialized: connection string not found');
+}
+```
+
+### Startup Script
+
+The backend startup script was updated so instrumentation loads before the Express server:
+
+```json
+"start": "node --import ./src/instrumentation.js src/server.js"
+```
+
+This matters because telemetry should be initialized before the application begins handling requests.
+
+### Dockerfile Mitigation
+
+One of the most important delivery findings was not in the application logic itself, but in the container startup path.
+
+The backend initialized Application Insights correctly in local testing, but AKS telemetry did not appear at first.
+
+The root cause was the Dockerfile.
+
+The Dockerfile was originally starting the application directly:
+
+```dockerfile
+CMD ["node", "src/server.js"]
+```
+
+That bypassed `npm start`, so `src/instrumentation.js` was never preloaded inside the container.
+
+The fix was:
+
+```dockerfile
+CMD ["npm", "start"]
+```
+
+After that change, the container used the package startup script and loaded the instrumentation bootstrap correctly.
+
+### Kubernetes Secret Configuration
+
+The Application Insights connection string was stored as a Kubernetes Secret and injected into the backend deployment through the environment variable:
+
+```text
+APPLICATIONINSIGHTS_CONNECTION_STRING
+```
+
+This kept the telemetry connection string out of source code and allowed the same backend image to run with or without Azure telemetry depending on the deployment environment.
+
+### AKS and KQL Evidence
+
+After the Dockerfile and Kubernetes Secret wiring were fixed, the backend image was rebuilt, pushed to Azure Container Registry, and redeployed to AKS Dev.
+
+The AKS pod logs confirmed:
+
+```text
+Azure Monitor Application Insights initialized
+Emergency surge API listening on port 4001
+```
+
+Fresh traffic was generated against:
+
+```text
+/health
+/loadtest/ping
+```
+
+Application Insights then showed request telemetry from the AKS backend, including:
+
+- AKS pod role instance
+- `GET /loadtest/ping`
+- public backend URL
+- HTTP 200 result code
+- success = true
+- request duration
+- KQL request table output
+- P50/P95 duration summary
+- failure count
+
+This completed the backend observability proof.
+
+---
+
 ## Growth Path
 
 If the concept were approved as a future product direction, this backend could evolve into a more robust architecture by integrating with additional services such as:
@@ -221,10 +408,14 @@ These are the areas most worth reviewing in the backend code:
 
 - health endpoint behavior
 - dispatch simulation endpoint behavior
+- `/loadtest/ping` endpoint for Azure Load Testing
 - queue/outcome support
 - collapse scheduling and outage behavior
 - middleware/error handling
 - structured logging/event shape
+- request logging and correlation/request ID handling
+- optional Azure Monitor / Application Insights bootstrap through `src/instrumentation.js`
+- Kubernetes Secret-based `APPLICATIONINSIGHTS_CONNECTION_STRING` configuration
 - process-level error handling
 
 ---
@@ -237,6 +428,10 @@ Typical local workflow:
 npm install
 npm start
 ```
+
+If `APPLICATIONINSIGHTS_CONNECTION_STRING` is not present, the backend still starts normally and logs that Application Insights was not initialized.
+
+If the connection string is present, the backend initializes Azure Monitor / Application Insights through the startup bootstrap before the Express server starts.
 
 If the project includes a development watch mode, that can be used while iterating locally.
 
